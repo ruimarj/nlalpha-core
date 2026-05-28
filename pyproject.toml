@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nlalpha-core"
+version = "0.1.0"
+description = "Core domain contracts and plugin framework for nlalpha ecosystem"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+# .env 文件环境变量加载支持
+dotenv = ["python-dotenv>=1.0"]
+
+# OpenTelemetry 可观测性（trace / metrics / logs）
+telemetry = [
+    "opentelemetry-api>=1.20",
+    "opentelemetry-sdk>=1.20",
+    "opentelemetry-exporter-otlp>=1.20",
+    "opentelemetry-semantic-conventions>=1.20",
+]
+
+# JSON 结构化日志输出
+json-log = ["python-json-logger>=2.0"]
+
+# 启用全部可选能力
+all = ["nlalpha-core[dotenv,telemetry,json-log]"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nlalpha"]
