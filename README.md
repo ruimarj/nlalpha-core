@@ -21,6 +21,7 @@ This is the **foundational package** — every other nlalpha package depends on 
 | `nlalpha.core.strategy.spec` | Strategy specification envelope | `StrategySpecEnvelope` |
 | `nlalpha.core.capabilities` | Capability provider framework | `CapabilityPlugin`, `CapabilityRegistry`, `CapabilityPluginRegistry`, `CapabilityEntry`, `ProviderManifest` |
 | `nlalpha.core.contracts.market` | Market data contracts | `MarketData`, `OrderLike`, `Bar`, `Order`, `Trade`, `Position` |
+| `nlalpha.core.drawer` | Shared data exchange layer (inter-MCP) | `DrawerBackend`, `FilesystemBackend`, `generate_ref`, `register_ref`, `resolve_ref`, `get_drawer` |
 | `nlalpha.core.telemetry` | Observability utilities | `get_tracer`, `start_span`, `setup_logging` |
 | `nlalpha.core.config` | Configuration helpers | — |
 | `nlalpha.core.errors` | Shared error types | — |
@@ -133,6 +134,35 @@ spec = StrategySpecEnvelope(
     capital={"initial": 1_000_000},
     family_spec={"indicators": [...]},
 )
+```
+
+### Drawer
+
+Shared data exchange layer for inter-MCP communication. MCP servers pass only lightweight `data_ref` strings; actual data stays in the drawer.
+
+**Design**: Each MCP server runs in its own process. Rather than serializing large DataFrames through MCP messages, `nlalpha-data` writes data to the drawer and returns a `data_ref`. `nlalpha-backtest` resolves the `data_ref` to retrieve the data.
+
+**Cross-process sharing**: The `_ref_index` (a `data_ref → key` mapping) is persisted to `index.json` under the drawer directory. All processes read and write this file, enabling stateless sharing without a running service.
+
+**Environment variables**:
+- `NLALPHA_WORKSPACE_DIR`: Base workspace directory (default: `./workspace`)
+- `NLALPHA_DRAWER_DIR`: Drawer directory (default: `$NLALPHA_WORKSPACE_DIR/drawer`)
+- `NLALPHA_DRAWER_BACKEND`: Backend type, currently only `filesystem`
+
+```python
+from nlalpha.core.drawer import get_drawer, generate_ref, register_ref, resolve_ref
+
+drawer = get_drawer()
+key = "bars_aapl_2024"
+data_ref = generate_ref()
+
+# Store data and register the ref
+path = drawer.put(key, parquet_bytes)
+register_ref(data_ref, key)
+
+# Later, in another process
+resolved_key = resolve_ref(data_ref)
+parquet_bytes = drawer.get(resolved_key)
 ```
 
 ## Who Depends on This
