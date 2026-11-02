@@ -1,15 +1,16 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
 name = "nlalpha-core"
-version = "0.1.0"
+version = "0.7.0"
 description = "Core domain contracts and plugin framework for nlalpha ecosystem"
 readme = "README.md"
-license = {text = "Apache-2.0"}
-requires-python = ">=3.10"
-dependencies = []
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
+requires-python = ">=3.12,<3.13"
+dependencies = ["tzdata==2026.3"]
 
 [project.optional-dependencies]
 # .env 文件环境变量加载支持
@@ -17,17 +18,20 @@ dotenv = ["python-dotenv>=1.0"]
 
 # OpenTelemetry 可观测性（trace / metrics / logs）
 telemetry = [
-    "opentelemetry-api>=1.20",
-    "opentelemetry-sdk>=1.20",
-    "opentelemetry-exporter-otlp>=1.20",
-    "opentelemetry-semantic-conventions>=1.20",
+    "opentelemetry-api>=1.45.1",
+    "opentelemetry-sdk>=1.45.1",
+    "opentelemetry-exporter-otlp>=1.45.1",
 ]
 
 # JSON 结构化日志输出
 json-log = ["python-json-logger>=2.0"]
 
+# S3 / MinIO 对象存储后端
+s3 = ["aiobotocore>=2.0", "botocore>=1.34"]
+redis = ["redis>=5.0"]
+
 # 启用全部可选能力
-all = ["nlalpha-core[dotenv,telemetry,json-log]"]
+all = ["nlalpha-core[dotenv,telemetry,json-log,s3,redis]>=0.7.0"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/nlalpha"]

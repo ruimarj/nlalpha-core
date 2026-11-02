@@ -1,33 +1,21 @@
-"""Event-driven strategy contract.
+"""Declare shared strategy lifecycle and order collection contracts.
 
-The sole requirement the core system imposes on strategies.
-Strategies only need to implement on_bar(bar) to receive data and generate orders via buy/sell;
-the engine handles order matching, account updates, and progress reporting.
-
-Design principles:
-- Minimal contract: core only requires on_bar + collect_orders, no implementation details forced
-- LLM-friendly: minimal interface, strategy code focuses only on trading logic
-- Plugin autonomy: CTA/Portfolio/Spread each defines its own strategy base class in plugins,
-  as long as this Protocol is satisfied, it can plug into the core backtest system
-
-Note: This module only defines the Protocol, no implementation provided.
-BaseEventDrivenStrategy is the shared event-driven strategy base class provided by core;
-each family plugin extends via inheritance.
+Event runtimes dispatch on_bar or an optional user-defined on_bars callback.
+Strategy families extend the shared base and declare their supported lifecycle entries.
 """
 
 from __future__ import annotations
 
 from typing import Protocol, runtime_checkable, Any
 
-from nlalpha.core.contracts.market import MarketData, OrderLike
+from nlalpha.core.contracts.market import CancelOrder, MarketData, Order, OrderEvent, Trade
 
 
 @runtime_checkable
 class EventDrivenStrategy(Protocol):
-    """Event-driven strategy protocol.
+    """Declare common event lifecycle and queued order collection.
 
-    All strategies connecting to the backtest system must satisfy this protocol.
-    The core backtest engine pushes data via on_bar() and collects trading instructions via collect_orders().
+    A runtime may dispatch a user-defined on_bars callback for grouped market data.
     """
 
     def on_bar(self, bar: MarketData) -> None:
@@ -46,24 +34,25 @@ class EventDrivenStrategy(Protocol):
         """Called when backtest ends."""
         ...
 
-    def collect_orders(self) -> list[OrderLike]:
-        """Collect and clear the current order queue.
+    def collect_commands(self) -> list[Order | CancelOrder]:
+        """Collect and clear submission and cancellation instructions in FIFO order."""
+        ...
 
-        The engine calls this after each on_bar to consume strategy-generated orders,
-        then clears the queue for the next bar.
-        """
+    def on_order(self, event: OrderEvent) -> None:
+        """Receive an execution order event after snapshots are updated."""
+        ...
+
+    def on_trade(self, trade: Trade) -> None:
+        """Receive an actual fill after snapshots are updated."""
         ...
 
 
 @runtime_checkable
 class VectorizedStrategy(Protocol):
-    """Vectorized backtest strategy protocol.
+    """Declare batch signal generation.
 
-    Mutually exclusive with EventDrivenStrategy — a strategy is either event-driven or vectorized.
-
-    Strategies receive a full DataFrame and return signal/weight series via pure functions.
-    The engine handles batch matching and performance calculation.
-    No subprocess isolation needed (no side effects); suitable for Portfolio / factor selection.
+    The consuming runtime defines input and output schemas.
+    The execution host owns code isolation.
     """
 
     def generate_signals(self, df: Any) -> Any:

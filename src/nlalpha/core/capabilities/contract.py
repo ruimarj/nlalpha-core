@@ -16,7 +16,8 @@ class FamilyContract:
     family: str
     base_class: str
     base_import: str
-    lifecycle_method: str
+    lifecycle_methods: list[str]
+    callback_methods: list[str] = field(default_factory=list)
     market_inputs: list[str] = field(default_factory=list)
     helpers: list[CapabilityEntry] = field(default_factory=list)
     readonly_props: list[str] = field(default_factory=list)
@@ -41,11 +42,13 @@ class FamilyContract:
         return [f"self.{p}" for p in self.readonly_props]
 
     def to_spec_schema(self) -> dict:
-        """Derive spec_schema from lifecycle_method."""
-        method_name = self.lifecycle_method.split("(")[0].strip()
+        """Derive the strategy schema from its accepted lifecycle entry points."""
+        method_names = " or ".join(signature.split("(", 1)[0].strip() for signature in self.lifecycle_methods)
+        callbacks = ", ".join(signature.split("(", 1)[0].strip() for signature in self.callback_methods)
+        callback_hint = f"; optional callbacks: {callbacks}" if callbacks else ""
         return {
-            "parameters": [{"name": "参数名", "type": "int|float|str|bool", "default": "默认值"}],
-            "code": f"完整的 Python 类代码字符串（继承 {self.base_class}，实现 {method_name}）",
+            "parameters": [{"name": "parameter_name", "type": "int|float|str|bool", "default": "default_value"}],
+            "code": f"Complete Python class code inheriting {self.base_class} and implementing at least one lifecycle entry point: {method_names}{callback_hint}",
         }
 
     def to_code_fix_constraints(self) -> str:
@@ -54,21 +57,16 @@ class FamilyContract:
         readonly = self.readonly_props
         if readonly:
             if len(readonly) == 1:
-                lines.append(f"self.{readonly[0]} 是只读属性，禁止赋值")
+                lines.append(f"self.{readonly[0]} is read-only; assignment is forbidden")
             else:
-                props_str = "、".join(f"self.{p}" for p in readonly)
-                lines.append(f"{props_str} 是只读属性，禁止赋值")
+                props_str = ", ".join(f"self.{p}" for p in readonly)
+                lines.append(f"{props_str} are read-only; assignment is forbidden")
         if not lines:
             return ""
         return "\n".join(f"{i + 2}. {line}" for i, line in enumerate(lines)) + "\n"
 
     def to_prompt(self) -> str:
-        """Generate a prompt metadata fragment for the strategy family.
-
-        Does not include helper lists (agents query those via list_family_helpers);
-        only includes metadata required for code generation: base class, lifecycle method,
-        constraints, and output format.
-        """
+        """Derive family code guidance from lifecycle, rules, and output schema."""
         # base_import 可能包含类名，需要拆分为模块路径
         if "." in self.base_import:
             parts = self.base_import.rsplit(".", 1)
@@ -77,28 +75,32 @@ class FamilyContract:
             module_path = self.base_import
 
         lines = [
-            f"## {self.family.upper()} 策略族",
+            f"## {self.family.upper()} strategy family",
             "",
-            f"基类：`{self.base_class}`",
-            f"继承方式：`from {module_path} import {self.base_class}`",
-            f"生命周期方法：`def {self.lifecycle_method}`",
-            f"价格数据访问：`{' / '.join(self.market_inputs)}`",
-            "",
-            "### 代码约束",
+            f"Base class: `{self.base_class}`",
+            f"Import: `from {module_path} import {self.base_class}`",
+            "Lifecycle entry points (implement at least one): " + " or ".join(
+                f"`def {signature}`" for signature in self.lifecycle_methods
+            ),
         ]
+        if self.callback_methods:
+            lines.append("Optional callbacks: " + ", ".join(
+                f"`def {signature}`" for signature in self.callback_methods
+            ))
+        lines.extend([f"Market inputs: `{' / '.join(self.market_inputs)}`", "", "### Code constraints"])
         for i, rule in enumerate(self.rules, 1):
             lines.append(f"{i}. {rule}")
 
         if self.readonly_props:
-            lines.extend(["", "### 只读属性（禁止赋值）"])
-            lines.append(f"`{'`、`'.join(f'self.{p}' for p in self.readonly_props)}`")
+            lines.extend(["", "### Read-only properties (assignment forbidden)"])
+            lines.append(f"`{'`, `'.join(f'self.{p}' for p in self.readonly_props)}`")
 
         schema = self.to_spec_schema()
         lines.extend([
             "",
-            "### 输出格式",
-            f"- `parameters`：{schema['parameters']}",
-            f"- `code`：{schema['code']}",
+            "### Output format",
+            f"- `parameters`: {schema['parameters']}",
+            f"- `code`: {schema['code']}",
         ])
 
         return "\n".join(lines)

@@ -18,7 +18,7 @@ class CapabilityPlugin(Protocol):
     """
 
     plugin_name: str  # Required
-    plugin_version: str = "0.0.0"
+    plugin_version: str
 
     def is_available(self) -> bool:
         """Check whether the plugin is available."""
@@ -34,6 +34,10 @@ class CapabilityPlugin(Protocol):
 
     def get_helpers(self) -> list[Any]:
         """Return the list of capability declarations exposed to strategy code."""
+        ...
+
+    def get_prompt_path(self) -> str | None:
+        """Return the path of required provider-authored guidance when declared."""
         ...
 
 
@@ -63,3 +67,6 @@ class BaseCapabilityPlugin(ABC, CapabilityPlugin):
 
     @abstractmethod
     def get_helpers(self) -> list[Any]: ...
+
+    @abstractmethod
+    def get_prompt_path(self) -> str | None: ...

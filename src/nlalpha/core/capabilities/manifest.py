@@ -20,7 +20,7 @@ class ProviderManifest:
     unavailable_reason: str | None = None
     methods: list[str] = field(default_factory=list)
     conventions: dict = field(default_factory=dict)
-    domains: list[str] = field(default_factory=list)  # 能力域标签，用于 CapabilityPluginRegistry 索引
+    domains: list[str] = field(default_factory=list)  # Provider 分类标签
     extra: dict[str, Any] = field(default_factory=dict)  # 开放扩展字段，用于未来权限控制、商业化 tier 等
 
     def to_dict(self) -> dict:

@@ -1,38 +1,25 @@
-"""Strategy family protocol and base class.
-
-Pure contracts with abstract base class — no external dependencies.
-Plugins retain only two responsibilities: provide capability contract,
-provide family confession.
-"""
+"""Typed contracts and the required strategy-family plugin base class."""
 
 from abc import ABC, abstractmethod
 from typing import Protocol, Any, runtime_checkable
 
+from nlalpha.core.capabilities.contract import FamilyContract
+
 
 @runtime_checkable
 class StrategyFamilyPlugin(Protocol):
-    """Strategy family plugin interface.
-
-    A plugin represents a strategy world, e.g. CTA, stock selection, arbitrage, or options.
-    The backbone interacts with plugins only through this interface,
-    without understanding internal strategy semantics.
-
-    Third-party plugins may implement this Protocol directly without inheriting BaseStrategyFamilyPlugin.
-    """
+    """Typed strategy-family interface enforced through BaseStrategyFamilyPlugin."""
 
     family: str  # Required
     plugin_name: str  # Required
-    plugin_version: str = "0.1.0"
+    plugin_version: str
 
-    def family_contract(self) -> Any: ...
+    def family_contract(self) -> FamilyContract: ...
     def confess(self) -> str: ...
 
 
 class BaseStrategyFamilyPlugin(ABC, StrategyFamilyPlugin):
-    """Abstract base class for strategy family plugins.
-
-    Internal plugins should inherit from this class to get instantiation-time enforcement.
-    """
+    """Required base class for installed strategy-family plugins."""
 
     __protocol_version__: str = "0.1.0"
 
@@ -50,13 +37,9 @@ class BaseStrategyFamilyPlugin(ABC, StrategyFamilyPlugin):
             raise TypeError(f"{cls.__name__} must define a class attribute 'plugin_name'")
 
     @abstractmethod
-    def family_contract(self) -> Any: ...
+    def family_contract(self) -> FamilyContract: ...
 
     @abstractmethod
     def confess(self) -> str:
-        """Strategy family confession: return supplementary notes in Markdown.
-
-        Must be implemented. Return empty string if no special notes.
-        May include: conventions, caveats, best practices.
-        """
+        """Return supplementary family conventions as Markdown."""
         ...

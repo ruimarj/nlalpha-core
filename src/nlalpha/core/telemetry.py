@@ -1,203 +1,294 @@
-"""OpenTelemetry observability utilities — unified entrypoint for tracing, metrics, and logs.
-
-Zero-intrusion: gracefully degrades to NoOp when opentelemetry is absent.
-"""
+"""Provide lazy instrumentation and explicitly owned process telemetry resources."""
 
 from __future__ import annotations
 
+import atexit
 import functools
+import importlib.util
+import inspect
 import logging
 import os
+import sys
+import threading
 from contextlib import contextmanager
+from importlib.metadata import version
 from typing import Any, Callable, Generator, TypeVar
-import inspect
 
 logger = logging.getLogger("nlalpha.telemetry")
 
-# Graceful import fallback
 
-try:
+def _sdk_installed() -> bool:
+    """Detect whether the optional SDK distribution is present."""
+    try:
+        return importlib.util.find_spec("opentelemetry.sdk") is not None
+    except ModuleNotFoundError as exc:
+        if exc.name != "opentelemetry":
+            raise
+        return False
+
+
+_OTEL_TRACE_AVAILABLE = _sdk_installed()
+_OTEL_METRICS_AVAILABLE = _OTEL_TRACE_AVAILABLE
+_OTEL_LOGS_AVAILABLE = _OTEL_TRACE_AVAILABLE
+
+if _OTEL_TRACE_AVAILABLE:
+    from opentelemetry import metrics as _metrics
+    from opentelemetry import _logs
     from opentelemetry import trace as _trace
     from opentelemetry.sdk.trace import TracerProvider as _TracerProvider
-    import sys
     from opentelemetry.sdk.trace.export import (
         BatchSpanProcessor as _BatchSpanProcessor,
         ConsoleSpanExporter as _ConsoleSpanExporter,
     )
     from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags, set_span_in_context
 
-    _OTEL_TRACE_AVAILABLE = True
-except ImportError:
-    _OTEL_TRACE_AVAILABLE = False
-    logger.debug("opentelemetry trace SDK not installed; tracing disabled")
-
-try:
     from opentelemetry.sdk.metrics import MeterProvider as _MeterProvider
-    import sys
     from opentelemetry.sdk.metrics.export import (
         ConsoleMetricExporter as _ConsoleMetricExporter,
         PeriodicExportingMetricReader as _PeriodicExportingMetricReader,
     )
 
-    _OTEL_METRICS_AVAILABLE = True
-except ImportError:
-    _OTEL_METRICS_AVAILABLE = False
-    logger.debug("opentelemetry metrics SDK not installed; metrics disabled")
-
-try:
     from opentelemetry.sdk._logs import LoggerProvider as _LoggerProvider, LoggingHandler
     from opentelemetry.sdk._logs.export import BatchLogRecordProcessor as _BatchLogRecordProcessor
     from opentelemetry.sdk._logs.export import ConsoleLogRecordExporter as _ConsoleLogExporter
 
-    _OTEL_LOGS_AVAILABLE = True
-except ImportError:
-    _OTEL_LOGS_AVAILABLE = False
-    logger.debug("opentelemetry logs SDK not installed; log correlation disabled")
-
-try:
     from opentelemetry.sdk.resources import Resource as _Resource
 
-    _OTEL_RESOURCE_AVAILABLE = True
-except ImportError:
-    _OTEL_RESOURCE_AVAILABLE = False
+
+_UNSET = object()
+_lock = threading.RLock()
+_resource: Any = None
+_tracer: Any = _UNSET
+_meter: Any = _UNSET
+_otel_log_handler: Any = _UNSET
+_owned_providers: dict[str, Any] = {}
+_configured = False
+_closed = False
+_atexit_registered = False
 
 
-import asyncio
-
-
-# Resource initialization
-
-_RESOURCE: Any = None
+def _instrumentation_version() -> str:
+    """Read the installed core distribution's instrumentation version."""
+    return version("nlalpha-core")
 
 
 def _get_resource() -> Any:
-    """Get or create the shared Resource."""
-    global _RESOURCE
-    if _RESOURCE is not None:
-        return _RESOURCE
-
-    if not _OTEL_RESOURCE_AVAILABLE:
-        return None
-
-    version = "0.0.0"
-    try:
-        version = __import__("nlalpha").__version__
-    except Exception:
-        pass
-
-    _RESOURCE = _Resource.create(
-        {
+    """Create the resource shared by explicitly configured SDK providers."""
+    global _resource
+    if _resource is None:
+        _resource = _Resource.create({
             "service.name": os.getenv("OTEL_SERVICE_NAME", "nlalpha"),
-            "service.version": version,
+            "service.version": _instrumentation_version(),
             "deployment.environment": os.getenv("OTEL_DEPLOYMENT_ENV", "development"),
-        }
-    )
-    return _RESOURCE
+        })
+    return _resource
 
-
-# OTLP exporter factory
 
 def _create_otlp_span_exporter() -> Any:
+    """Create the trace exporter selected by its configured OTLP endpoint."""
+    endpoint = os.getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") or os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+    if not endpoint:
+        return None
     from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
-
-    endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
-    return OTLPSpanExporter(endpoint=endpoint) if endpoint else None
+    return OTLPSpanExporter(endpoint=endpoint)
 
 
 def _create_otlp_metric_exporter() -> Any:
+    """Create the metric exporter selected by its configured OTLP endpoint."""
+    endpoint = os.getenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT") or os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+    if not endpoint:
+        return None
     from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
-
-    endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
-    return OTLPMetricExporter(endpoint=endpoint) if endpoint else None
+    return OTLPMetricExporter(endpoint=endpoint)
 
 
 def _create_otlp_log_exporter() -> Any:
-    from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter
-
-    endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
-    return OTLPLogExporter(endpoint=endpoint) if endpoint else None
-
-
-# Tracer initialization
-
-def _init_tracer() -> Any:
-    if not _OTEL_TRACE_AVAILABLE:
-        return _NoOpTracer()
-
-    resource = _get_resource()
-    provider = _TracerProvider(resource=resource) if resource else _TracerProvider()
-
-    # Exporter selection: OTLP > Console
-    otlp_exporter = _create_otlp_span_exporter()
-    if otlp_exporter is not None:
-        provider.add_span_processor(_BatchSpanProcessor(otlp_exporter))
-        logger.info("OTLP trace exporter enabled | endpoint=%s", os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
-    else:
-        provider.add_span_processor(_BatchSpanProcessor(_ConsoleSpanExporter(out=sys.stderr)))
-
-    _trace.set_tracer_provider(provider)
-
-    version = "0.0.0"
-    try:
-        version = __import__("nlalpha").__version__
-    except Exception:
-        pass
-    return _trace.get_tracer("nlalpha", version)
-
-
-# Meter initialization
-
-def _init_meter() -> Any:
-    if not _OTEL_METRICS_AVAILABLE:
-        return _NoOpMeter()
-
-    resource = _get_resource()
-    readers = []
-
-    otlp_exporter = _create_otlp_metric_exporter()
-    if otlp_exporter is not None:
-        readers.append(_PeriodicExportingMetricReader(otlp_exporter))
-        logger.info("OTLP metric exporter enabled | endpoint=%s", os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
-    else:
-        readers.append(_PeriodicExportingMetricReader(_ConsoleMetricExporter(out=sys.stderr)))
-
-    provider = _MeterProvider(resource=resource, metric_readers=readers) if resource else _MeterProvider(metric_readers=readers)
-    from opentelemetry.metrics import set_meter_provider
-    set_meter_provider(provider)
-
-    version = "0.0.0"
-    try:
-        version = __import__("nlalpha").__version__
-    except Exception:
-        pass
-    return provider.get_meter("nlalpha", version)
-
-
-# Logger initialization (OTel LoggingHandler for trace-log correlation)
-
-def _init_otel_log_handler() -> Any:
-    """Initialize OpenTelemetry LoggingHandler for trace-log correlation.
-
-    Returns a LoggingHandler that injects trace_id/span_id into log records,
-    or None if OTel logs SDK is unavailable.
-    """
-    if not _OTEL_LOGS_AVAILABLE:
+    """Create the log exporter selected by its configured OTLP endpoint."""
+    endpoint = os.getenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT") or os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+    if not endpoint:
         return None
+    from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter
+    return OTLPLogExporter(endpoint=endpoint)
 
+
+def _build_provider(signal: str) -> Any:
+    """Construct one SDK provider and transfer exporter ownership into it."""
     resource = _get_resource()
-    provider = _LoggerProvider(resource=resource) if resource else _LoggerProvider()
+    if signal == "metrics":
+        exporter = _create_otlp_metric_exporter()
+        if exporter is None:
+            exporter = _ConsoleMetricExporter(out=sys.stderr)
+        try:
+            reader = _PeriodicExportingMetricReader(exporter)
+        except BaseException:
+            exporter.shutdown()
+            raise
+        try:
+            return _MeterProvider(resource=resource, metric_readers=[reader], shutdown_on_exit=False)
+        except BaseException:
+            reader.shutdown()
+            raise
 
-    otlp_exporter = _create_otlp_log_exporter()
-    if otlp_exporter is not None:
-        provider.add_log_record_processor(_BatchLogRecordProcessor(otlp_exporter))
-        logger.info("OTLP log exporter enabled | endpoint=%s", os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
+    provider_type, exporter_factory, console_type, processor_type = {
+        "trace": (_TracerProvider, _create_otlp_span_exporter, _ConsoleSpanExporter, _BatchSpanProcessor),
+        "logs": (_LoggerProvider, _create_otlp_log_exporter, _ConsoleLogExporter, _BatchLogRecordProcessor),
+    }[signal]
+    provider = provider_type(resource=resource, shutdown_on_exit=False)
+    try:
+        exporter = exporter_factory()
+        if exporter is None:
+            exporter = console_type(out=sys.stderr)
+        try:
+            processor = processor_type(exporter)
+        except BaseException:
+            exporter.shutdown()
+            raise
+        try:
+            if signal == "trace":
+                provider.add_span_processor(processor)
+            else:
+                provider.add_log_record_processor(processor)
+        except BaseException:
+            processor.shutdown()
+            raise
+    except BaseException:
+        provider.shutdown()
+        raise
+    return provider
+
+
+def _require_open() -> None:
+    """Reject instrumentation after the process telemetry lifecycle has ended."""
+    if _closed:
+        raise RuntimeError("process telemetry has been shut down")
+
+
+def _timeout(timeout_millis: int) -> None:
+    """Validate a positive integer export timeout."""
+    if isinstance(timeout_millis, bool) or not isinstance(timeout_millis, int) or timeout_millis <= 0:
+        raise ValueError("timeout_millis must be a positive integer")
+
+
+def _close_provider(signal: str, provider: Any, timeout_millis: int) -> None:
+    """Close a provider through its signal's SDK lifecycle interface."""
+    if signal == "metrics":
+        provider.shutdown(timeout_millis=timeout_millis)
     else:
-        provider.add_log_record_processor(_BatchLogRecordProcessor(_ConsoleLogExporter(out=sys.stderr)))
-
-    return LoggingHandler(logger_provider=provider)
+        provider.shutdown()
 
 
-# No-op implementations
+def configure_telemetry() -> None:
+    """Install SDK providers owned by this standalone process. Configuration failures are terminal."""
+    global _configured, _closed, _atexit_registered, _tracer, _meter
+    with _lock:
+        _require_open()
+        if _configured:
+            return
+        if not _OTEL_TRACE_AVAILABLE:
+            if any(os.getenv(name) for name in (
+                "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+                "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+            )):
+                _closed = True
+                raise RuntimeError("OTLP export requires the OpenTelemetry SDK; install nlalpha-core[telemetry]")
+            return
+        candidates: dict[str, Any] = {}
+        try:
+            for signal in ("trace", "metrics", "logs"):
+                candidates[signal] = _build_provider(signal)
+            interfaces = {
+                "trace": (_trace.set_tracer_provider, _trace.get_tracer_provider),
+                "metrics": (_metrics.set_meter_provider, _metrics.get_meter_provider),
+                "logs": (_logs.set_logger_provider, _logs.get_logger_provider),
+            }
+            for signal, provider in candidates.items():
+                setter, getter = interfaces[signal]
+                setter(provider)
+                if getter() is not provider:
+                    raise RuntimeError(f"an external {signal} provider is already configured")
+        except BaseException as exc:
+            _closed = True
+            errors = [exc, *_close_handler()]
+            for signal, provider in candidates.items():
+                try:
+                    _close_provider(signal, provider, 30000)
+                except BaseException as cleanup_error:
+                    cleanup_error.add_note(f"closing telemetry candidate: {signal}")
+                    errors.append(cleanup_error)
+            if len(errors) > 1:
+                raise BaseExceptionGroup("telemetry configuration and cleanup failed", errors)
+            raise
+        _owned_providers.update(candidates)
+        _tracer = _meter = _UNSET
+        _configured = True
+        if not _atexit_registered:
+            atexit.register(shutdown)
+            _atexit_registered = True
+
+
+def _flush_owned(timeout_millis: int) -> list[BaseException]:
+    """Flush every owned signal while collecting independent failures."""
+    errors = []
+    for signal, provider in _owned_providers.items():
+        try:
+            if provider.force_flush(timeout_millis=timeout_millis) is False:
+                raise TimeoutError(f"{signal} telemetry flush timed out")
+        except BaseException as exc:
+            exc.add_note(f"flushing telemetry signal: {signal}")
+            errors.append(exc)
+    return errors
+
+
+def force_flush(timeout_millis: int = 30000) -> bool:
+    """Flush all process-owned signals and report every export failure."""
+    _timeout(timeout_millis)
+    with _lock:
+        errors = _flush_owned(timeout_millis)
+        if errors:
+            raise BaseExceptionGroup("telemetry flush failed", errors)
+        return True
+
+
+def _close_handler() -> list[BaseException]:
+    """Detach and close the module's handler throughout the logging hierarchy."""
+    errors = []
+    if _otel_log_handler is _UNSET or _otel_log_handler is None:
+        return errors
+    targets = [logging.getLogger(), *logging.Logger.manager.loggerDict.copy().values()]
+    for target in targets:
+        if isinstance(target, logging.Logger):
+            try:
+                target.removeHandler(_otel_log_handler)
+            except BaseException as exc:
+                exc.add_note(f"detaching telemetry handler: {target.name}")
+                errors.append(exc)
+    try:
+        _otel_log_handler.close()
+    except BaseException as exc:
+        errors.append(exc)
+    return errors
+
+
+def shutdown(timeout_millis: int = 30000) -> None:
+    """Detach the module's handler and close every process-owned signal exactly once."""
+    global _closed
+    _timeout(timeout_millis)
+    with _lock:
+        if _closed:
+            return
+        _closed = True
+        errors = _close_handler()
+        errors.extend(_flush_owned(timeout_millis))
+        for signal, provider in _owned_providers.items():
+            try:
+                _close_provider(signal, provider, timeout_millis)
+            except BaseException as exc:
+                exc.add_note(f"closing telemetry signal: {signal}")
+                errors.append(exc)
+        _owned_providers.clear()
+        if errors:
+            raise BaseExceptionGroup("telemetry shutdown failed", errors)
+
 
 class _NoOpTracer:
     def start_span(self, name: str, **kwargs: Any) -> _NoOpSpan:
@@ -247,34 +338,60 @@ class _NoOpHistogram:
         pass
 
 
-# Global instances (lazy init on first access)
+if _OTEL_LOGS_AVAILABLE:
+    class _TelemetryLoggingHandler(LoggingHandler):
+        """Retain SDK handler semantics throughout its explicit open and closed lifecycle."""
 
-_tracer = _init_tracer()
-_meter = _init_meter()
-_otel_log_handler = _init_otel_log_handler()
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self._lifecycle_lock = threading.RLock()
+            self._telemetry_closed = False
+            super().__init__(*args, **kwargs)
 
+        def flush(self) -> None:
+            """Flush live handlers through the SDK's supported interface."""
+            with self._lifecycle_lock:
+                if not self._telemetry_closed:
+                    super().flush()
 
-# Public API
+        def close(self) -> None:
+            """Mark the handler closed before releasing its logging resources."""
+            with self._lifecycle_lock:
+                if not self._telemetry_closed:
+                    self._telemetry_closed = True
+                    super().close()
+
 
 F = TypeVar("F", bound=Callable[..., Any])
 
 
 def get_tracer() -> Any:
-    """Return the global tracer instance."""
-    return _tracer
+    """Lazily obtain instrumentation from the host's current global tracer provider."""
+    global _tracer
+    with _lock:
+        _require_open()
+        if _tracer is _UNSET:
+            _tracer = _trace.get_tracer("nlalpha", _instrumentation_version()) if _OTEL_TRACE_AVAILABLE else _NoOpTracer()
+        return _tracer
 
 
 def get_meter() -> Any:
-    """Return the global meter instance."""
-    return _meter
+    """Lazily obtain instrumentation from the host's current global meter provider."""
+    global _meter
+    with _lock:
+        _require_open()
+        if _meter is _UNSET:
+            _meter = _metrics.get_meter("nlalpha", _instrumentation_version()) if _OTEL_METRICS_AVAILABLE else _NoOpMeter()
+        return _meter
 
 
 def get_otel_log_handler() -> Any:
-    """Return the OpenTelemetry LoggingHandler for trace-log correlation.
-
-    Attach this handler to any logger to automatically inject trace_id/span_id.
-    """
-    return _otel_log_handler
+    """Lazily create a handler bound to the host's current global log provider."""
+    global _otel_log_handler
+    with _lock:
+        _require_open()
+        if _otel_log_handler is _UNSET:
+            _otel_log_handler = _TelemetryLoggingHandler(logger_provider=_logs.get_logger_provider()) if _OTEL_LOGS_AVAILABLE else None
+        return _otel_log_handler
 
 
 @contextmanager
@@ -290,7 +407,7 @@ def start_span(
     if attributes:
         kwargs["attributes"] = attributes
 
-    with _tracer.start_as_current_span(name, **kwargs) as span:
+    with get_tracer().start_as_current_span(name, **kwargs) as span:
         yield span
 
 
@@ -327,7 +444,7 @@ def span(name: str | None = None) -> Callable[[F], F]:
     return decorator
 
 
-# Traceparent propagation helpers
+# 分布式追踪上下文传播
 
 def inject_traceparent() -> str | None:
     """Extract the current traceparent string for propagation."""
@@ -369,26 +486,28 @@ def extract_traceparent(traceparent: str | None) -> Any:
 
 
 def is_enabled() -> bool:
-    """Return True if OpenTelemetry tracing is active."""
+    """Report whether the optional tracing SDK is installed."""
     return _OTEL_TRACE_AVAILABLE
 
 
 def is_metrics_enabled() -> bool:
-    """Return True if OpenTelemetry metrics is active."""
+    """Report whether the optional metrics SDK is installed."""
     return _OTEL_METRICS_AVAILABLE
 
 
 def is_logs_enabled() -> bool:
-    """Return True if OpenTelemetry logs is active."""
+    """Report whether the optional logging SDK is installed."""
     return _OTEL_LOGS_AVAILABLE
 
 
 # 统一日志入口：将 OTel LoggingHandler 挂载到根 logger
 
-def setup_logging(level: str = "INFO") -> None:
-    """Configure Python stdlib logging and attach OTel LoggingHandler."""
-    _ensure_root_logging_configured(level)
-    _attach_otel_log_handler()
+def setup_logging(level: str = "INFO", json_format: bool = False) -> None:
+    """Configure root logger with formatter and attach OTel handler."""
+    with _lock:
+        _require_open()
+        _ensure_root_logging_configured(level, json_format)
+        _attach_otel_log_handler()
 
 
 _SILENCE_LOGGERS = (
@@ -397,22 +516,40 @@ _SILENCE_LOGGERS = (
 )
 
 
-def _ensure_root_logging_configured(level: str) -> None:
-    """Ensure root logger has at least one StreamHandler to avoid "No handler" warnings."""
-    root = logging.getLogger()
-    if root.handlers:
-        return
+def _create_formatter(json_format: bool = False) -> logging.Formatter:
+    """Create text or JSON formatter. Falls back to text if python-json-logger missing."""
+    if json_format:
+        try:
+            from pythonjsonlogger.json import JsonFormatter
+            return JsonFormatter(
+                fmt="%(asctime)s %(levelname)s %(name)s %(message)s %(otelTraceID)s %(otelSpanID)s",
+                datefmt="%Y-%m-%dT%H:%M:%S",
+            )
+        except ImportError:
+            logger.warning("python-json-logger not installed, falling back to text format")
+    return logging.Formatter(
+        fmt="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    )
 
+
+def _ensure_root_logging_configured(level: str, json_format: bool = False) -> None:
+    """Ensure root logger has handler and correct formatter."""
+    root = logging.getLogger()
     lvl = _resolve_log_level(level)
     root.setLevel(lvl)
 
+    formatter = _create_formatter(json_format)
+
     import sys as _sys
-    handler = logging.StreamHandler(_sys.stderr)
-    handler.setFormatter(logging.Formatter(
-        fmt="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%S",
-    ))
-    root.addHandler(handler)
+    if not root.handlers:
+        handler = logging.StreamHandler(_sys.stderr)
+        handler.setFormatter(formatter)
+        root.addHandler(handler)
+    else:
+        for handler in root.handlers:
+            if isinstance(handler, logging.StreamHandler):
+                handler.setFormatter(formatter)  # 替换已有 handler 的 formatter
 
     for noisy in _SILENCE_LOGGERS:
         logging.getLogger(noisy).setLevel(logging.WARNING)
@@ -420,17 +557,16 @@ def _ensure_root_logging_configured(level: str) -> None:
 
 def _attach_otel_log_handler() -> None:
     """Attach OTel LoggingHandler to root logger if OTel is available."""
-    if _otel_log_handler is None:
-        return
-
-    root = logging.getLogger()
-    if any(isinstance(h, LoggingHandler) for h in root.handlers):
-        return
-
-    otel_handler = _otel_log_handler
-    otel_handler.setLevel(logging.NOTSET)
-    root.addHandler(otel_handler)
-    logger.info("OTel LoggingHandler attached | trace-log correlation enabled")
+    with _lock:
+        otel_handler = get_otel_log_handler()
+        if otel_handler is None:
+            return
+        root = logging.getLogger()
+        if any(isinstance(handler, LoggingHandler) for handler in root.handlers):
+            return
+        otel_handler.setLevel(logging.NOTSET)
+        root.addHandler(otel_handler)
+        logger.info("OTel LoggingHandler attached | trace-log correlation enabled")
 
 
 def _resolve_log_level(raw: str) -> int:
