@@ -252,4 +252,4 @@ Artifact metadata has a 64 KiB protocol ceiling; this is not a payload ceiling. 
 
 ## License
 
-`nlalpha-core` is one of the 10 community distributions under AGPL-3.0-or-later. The root license covers only those community distributions and common community material; private packages, Jingzhe platform code, the adapter, and third-party dependencies retain their own licenses.
+`nlalpha-core` is one of the 10 community distributions under AGPL-3.0-or-later. The root license covers only those community distributions and common community material; private packages, platform code, the adapter, and third-party dependencies retain their own licenses.
