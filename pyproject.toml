@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "nlalpha-core"
-version = "0.7.0"
+version = "0.7.1"
 description = "Core domain contracts and plugin framework for nlalpha ecosystem"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
@@ -31,7 +31,7 @@ s3 = ["aiobotocore>=2.0", "botocore>=1.34"]
 redis = ["redis>=5.0"]
 
 # 启用全部可选能力
-all = ["nlalpha-core[dotenv,telemetry,json-log,s3,redis]>=0.7.0"]
+all = ["nlalpha-core[dotenv,telemetry,json-log,s3,redis]>=0.7.1"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/nlalpha"]

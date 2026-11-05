@@ -20,7 +20,7 @@ Record entry, holding, exit, sizing, capital, cost, risk, and execution timing r
 
 ## Implement and validate
 
-Build the complete specification and implementation against the selected family's current contract. Use the applicable static checker, then the mock validator for the selected execution path when available. Use the same strategy and intended configuration for validation. Correct ordinary implementation or configuration errors within the original request and repeat affected checks. Do not change user choices or the research meaning to make validation pass.
+Build the complete specification and implementation against the selected family's current contract. Read the family's `spec_schema` and use `family_spec.code` as the only code entry. When a validator returns a field path or suggestion, apply it exactly; do not retry the same shape. Use the applicable static checker, then the mock validator for the selected execution path when available. Use the same strategy and intended configuration for validation. Correct ordinary implementation or configuration errors within the original request and repeat affected checks. Do not change user choices or the research meaning to make validation pass. A mock pass with zero trades only proves the strategy loads and runs; it does not exercise order submission. Do not infer order-path or helper correctness from a zero-trade mock.
 
 ## Deliver the result
 

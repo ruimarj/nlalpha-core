@@ -1,7 +1,7 @@
 # Backtest execution
 
 Skill ID: backtest-execution  
-Revision: 1  
+Revision: 2
 Language: en
 
 ## Purpose
@@ -16,13 +16,17 @@ Distinguish a new historical run from checking, cancelling, retrieving, or revie
 
 Preserve the user's strategy, symbols, dates, timing, account behavior, sizing, costs, and risk choices. Confirm the chosen family and engine can express them. In particular, retain dynamic sizing from currently available cash when requested; do not approximate it with static initial capital.
 
-Check data coverage, quality, price-source evidence, timestamps, timezone, units, and calendar for the requested range. Load only the data required by the task and preserve immutable references with their source and scope. Validate required fields using the selected event or batch object's current contract, not an example or remembered schema. Run the applicable static check and path-specific mock validation before submitting a historical run.
+Check data coverage, quality, price-source evidence, timestamps, timezone, units, and calendar for the requested range. Load only the data required by the task and preserve immutable references with their source and scope. Validate required fields using the selected event or batch object's current contract, not an example or remembered schema. Run the applicable static check and path-specific mock validation before submitting a historical run. Treat a mock pass with zero trades as no order-path coverage: check `order_path_exercised` and warnings, and use a fixture that triggers a signal when order-path coverage matters. When a `confess` call rejects section names, use the returned `available_sections` instead of guessing.
 
 ## Run and inspect
 
 Submit only after prerequisites pass and the user authorized a new run. Observe the existing job until its actual terminal state. If status is unknown or work is still running, do not submit a duplicate. For an existing job, perform only the requested status, cancellation, result, or review operation.
 
 Retrieve result and report sections only as needed for the requested conclusion. Check that status is a clean successful result, the data and strategy match the request, and the reports cover the conclusion's scope. Treat missing, unrecorded, truncated, or unavailable fields as unknown, not zero. A finished job or successful tool response alone is not a successful backtest result.
+
+## Diagnose failures
+
+Read the structured error and `log_tail` from `backtest.get_backtest_result` first; do not call `backtest.get_backtest_logs` before that. Escalate to `backtest.get_backtest_logs` only when no worker error is present, the error is generic or truncated, the tail is insufficient, or the user asks for more. Page the tail first, then byte `offset`/`limit`; read at most two or three chunks per diagnosis and keep each chunk at or below 64 KiB. A log reference alone does not prove access; report unavailable evidence as a gap.
 
 ## Report the result
 
