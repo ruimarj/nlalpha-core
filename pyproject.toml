@@ -6,11 +6,22 @@ build-backend = "hatchling.build"
 name = "nlalpha-core"
 version = "0.7.1"
 description = "Core domain contracts and plugin framework for nlalpha ecosystem"
+authors = [{ name = "Rui Ma" }]
 readme = "README.md"
 license = "AGPL-3.0-or-later"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "NOTICE"]
+classifiers = [
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+]
 requires-python = ">=3.12,<3.13"
 dependencies = ["tzdata==2026.3"]
+
+[project.urls]
+Homepage = "https://github.com/ruimarj/nlalpha-core"
+Repository = "https://github.com/ruimarj/nlalpha-core"
+Issues = "https://github.com/ruimarj/nlalpha-core/issues"
 
 [project.optional-dependencies]
 # .env 文件环境变量加载支持

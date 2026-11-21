@@ -251,4 +251,6 @@ telemetry instrument 是惰性的；宿主已配置公共 provider 时与其共�
 
 ## 许可证
 
+版权所有 (c) 2026 Rui Ma。以 AGPL-3.0-or-later 授权，详见 [LICENSE](LICENSE)。
+
 `nlalpha-core` 是 AGPL-3.0-or-later 下的 10 个社区分发之一。根许可证只覆盖这些社区分发和通用社区材料；私有包、平台代码、适配器和第三方依赖保留各自许可证。
